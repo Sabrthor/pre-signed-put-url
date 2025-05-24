@@ -1,37 +1,40 @@
-// Next.js API route support: https://nextjs.org/docs/api-routes/introduction
+// pages/api/media.ts
 import type { NextApiRequest, NextApiResponse } from "next";
-import S3 from "aws-sdk/clients/s3";
+import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
+import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { randomUUID } from "crypto";
 
-const s3 = new S3({
-  apiVersion: "2006-03-01",
-  accessKeyId: process.env.ACCESS_KEY,
-  secretAccessKey: process.env.SECRET_KEY,
+const s3Client = new S3Client({
   region: process.env.REGION,
-  signatureVersion: "v4",
+  credentials: {
+    accessKeyId: process.env.ACCESS_KEY!,
+    secretAccessKey: process.env.SECRET_KEY!,
+  },
 });
 
-export default async function handler(
-  req: NextApiRequest,
-  res: NextApiResponse
-) {
-  const ex = (req.query.fileType as string).split("/")[1];
+export default async function mediaHandler(req: NextApiRequest, res: NextApiResponse) {
+  try {
+    const fileType = (req.query.fileType as string) || "application/octet-stream";
+    const extension = fileType.split("/")[1] || "bin";
 
-  const Key = `${randomUUID()}.${ex}`;
+    const Key = `${randomUUID()}.${extension}`;
 
-  const s3Params = {
-    Bucket: process.env.BUCKET_NAME,
-    Key,
-    Expires: 60,
-    ContentType: `image/${ex}`,
-  };
+    const command = new PutObjectCommand({
+      Bucket: process.env.BUCKET_NAME,
+      Key,
+      ContentType: fileType,
+    });
 
-  const uploadUrl = await s3.getSignedUrl("putObject", s3Params);
+    const uploadUrl = await getSignedUrl(s3Client, command, { expiresIn: 60 });
 
-  console.log("uploadUrl", uploadUrl);
+    console.log("uploadUrl", uploadUrl);
 
-  res.status(200).json({
-    uploadUrl,
-    key: Key,
-  });
+    res.status(200).json({
+      uploadUrl,
+      key: Key,
+    });
+  } catch (error) {
+    console.error("Error generating signed URL", error);
+    res.status(500).json({ error: "Failed to generate upload URL" });
+  }
 }
