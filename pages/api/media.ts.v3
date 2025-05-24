@@ -1,51 +1,16 @@
-import fs from "fs";
-import path from "path";
 import type { NextApiRequest, NextApiResponse } from "next";
 import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { randomUUID } from "crypto";
 import { STSClient, AssumeRoleCommand } from "@aws-sdk/client-sts";
 
-// Cache allow-list in memory for performance
-let allowedAccountsCache: string[] | null = null;
-let allowedAccountsCacheTime = 0;
-const ALLOW_LIST_TTL_MS = 60 * 1000; // 60 seconds
-function getAllowedAccounts(): string[] {
-  if (!allowedAccountsCache) {
-    const allowListPath = path.join(process.cwd(), "allowedAccounts.json");
-    try {
-      allowedAccountsCache = JSON.parse(fs.readFileSync(allowListPath, "utf-8"));
-    } catch {
-      allowedAccountsCache = [];
-    }
-  }
-  return allowedAccountsCache as string[];
-}
-
-// Helper to validate AWS account ID format
-function isValidAccountId(accountId: string): boolean {
-  return /^\d{12}$/.test(accountId);
-}
-
 export default async function mediaHandler(req: NextApiRequest, res: NextApiResponse) {
   try {
     const { accountId, fileType, bucketName, region, originalName } = req.body;
     const roleName = "apt-aghosh-pe-s3-fullaccess";
-
-    // Validate accountId presence and format
     if (!accountId) {
       return res.status(400).json({ error: "accountId is required" });
     }
-    if (!isValidAccountId(accountId)) {
-      return res.status(400).json({ error: "Invalid AWS accountId format." });
-    }
-
-    // Check allow-list
-    const allowedAccounts = getAllowedAccounts();
-    if (!allowedAccounts.includes(accountId)) {
-      return res.status(403).json({ error: "This accountId is not allowed." });
-    }
-
     const roleArn = `arn:aws:iam::${accountId}:role/${roleName}`;
 
     // Assume the role using STS
@@ -89,8 +54,7 @@ export default async function mediaHandler(req: NextApiRequest, res: NextApiResp
       key: Key,
     });
   } catch (error: any) {
-    // Log detailed error server-side, return generic error to client
     console.error("Error generating signed URL", error);
-    res.status(500).json({ error: "Failed to generate upload URL" });
+    res.status(500).json({ error: error.message || "Failed to generate upload URL" });
   }
 }
