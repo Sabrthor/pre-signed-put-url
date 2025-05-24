@@ -25,7 +25,7 @@ export default async function mediaHandler(req: NextApiRequest, res: NextApiResp
       ContentType: fileType,
     });
 
-    const uploadUrl = await getSignedUrl(s3Client, command, { expiresIn: 60 });
+    const uploadUrl = await getSignedUrl(s3Client, command, { expiresIn: 300 });
 
     console.log("uploadUrl", uploadUrl);
 
