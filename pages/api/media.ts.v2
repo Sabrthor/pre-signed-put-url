@@ -1,3 +1,4 @@
+// pages/api/media.ts
 import type { NextApiRequest, NextApiResponse } from "next";
 import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
@@ -6,12 +7,11 @@ import { STSClient, AssumeRoleCommand } from "@aws-sdk/client-sts";
 
 export default async function mediaHandler(req: NextApiRequest, res: NextApiResponse) {
   try {
-    const { accountId, fileType, bucketName, region, originalName } = req.body;
-    const roleName = "apt-aghosh-pe-s3-fullaccess";
-    if (!accountId) {
-      return res.status(400).json({ error: "accountId is required" });
+    const { roleArn, fileType, bucketName, region, originalName } = req.body;
+
+    if (!roleArn) {
+      return res.status(400).json({ error: "roleArn is required" });
     }
-    const roleArn = `arn:aws:iam::${accountId}:role/${roleName}`;
 
     // Assume the role using STS
     const sts = new STSClient({ region: region || process.env.REGION });

@@ -1,19 +1,20 @@
+// lib/uploadToS3.ts
 import axios from "axios";
 
 interface UploadOptions {
-  accountId: string;
+  roleArn: string;
   bucketName?: string;
   region?: string;
 }
 
 export async function uploadToS3(
   file: File,
-  { accountId, bucketName, region }: UploadOptions
+  { roleArn, bucketName, region }: UploadOptions
 ): Promise<string | null> {
   try {
     // Request a pre-signed URL from the backend
     const { data } = await axios.post("/api/media", {
-      accountId,
+      roleArn,
       bucketName,
       region,
       fileType: file.type,

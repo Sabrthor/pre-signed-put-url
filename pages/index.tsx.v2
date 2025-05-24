@@ -3,7 +3,7 @@ import { uploadToS3 } from "../lib/uploadToS3";
 
 function Upload() {
   const [message, setMessage] = useState("");
-  const [accountId, setAccountId] = useState("");
+  const [roleArn, setRoleArn] = useState("");
   const [bucketName, setBucketName] = useState("");
   const [region, setRegion] = useState("");
   const [file, setFile] = useState<File | null>(null);
@@ -16,12 +16,12 @@ function Upload() {
       return;
     }
 
-    if (!accountId) {
-      setMessage("AWS Account ID is required.");
+    if (!roleArn) {
+      setMessage("Role ARN is required.");
       return;
     }
 
-    const key = await uploadToS3(file, { accountId, bucketName, region });
+    const key = await uploadToS3(file, { roleArn, bucketName, region });
 
     if (key) {
       setMessage(`Upload successful. S3 Key: ${key}`);
@@ -36,13 +36,13 @@ function Upload() {
       <form onSubmit={handleSubmit}>
         <div>
           <label>
-            AWS Account ID:
+            Role ARN:
             <input
               type="text"
-              value={accountId}
-              onChange={(e) => setAccountId(e.target.value)}
+              value={roleArn}
+              onChange={(e) => setRoleArn(e.target.value)}
               required
-              placeholder="851725590437"
+              placeholder="arn:aws:iam::123456789012:role/YourRole"
               style={{ width: "400px" }}
             />
           </label>
