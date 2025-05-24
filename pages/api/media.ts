@@ -1,36 +1,60 @@
 import fs from "fs";
 import path from "path";
 import type { NextApiRequest, NextApiResponse } from "next";
-import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
+import { S3Client, PutObjectCommand, CreateMultipartUploadCommand, UploadPartCommand, CompleteMultipartUploadCommand, AbortMultipartUploadCommand } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { randomUUID } from "crypto";
 import { STSClient, AssumeRoleCommand } from "@aws-sdk/client-sts";
 
-// Cache allow-list in memory for performance
+// Dynamic allow-list cache with TTL
 let allowedAccountsCache: string[] | null = null;
 let allowedAccountsCacheTime = 0;
 const ALLOW_LIST_TTL_MS = 60 * 1000; // 60 seconds
+
 function getAllowedAccounts(): string[] {
-  if (!allowedAccountsCache) {
+  const now = Date.now();
+  if (
+    !allowedAccountsCache ||
+    now - allowedAccountsCacheTime > ALLOW_LIST_TTL_MS
+  ) {
     const allowListPath = path.join(process.cwd(), "allowedAccounts.json");
     try {
       allowedAccountsCache = JSON.parse(fs.readFileSync(allowListPath, "utf-8"));
     } catch {
       allowedAccountsCache = [];
     }
+    allowedAccountsCacheTime = now;
   }
   return allowedAccountsCache as string[];
 }
 
-// Helper to validate AWS account ID format
 function isValidAccountId(accountId: string): boolean {
   return /^\d{12}$/.test(accountId);
 }
 
+async function getS3Client(accountId: string, region: string, roleName: string) {
+  const roleArn = `arn:aws:iam::${accountId}:role/${roleName}`;
+  const sts = new STSClient({ region });
+  const assumed = await sts.send(new AssumeRoleCommand({
+    RoleArn: roleArn,
+    RoleSessionName: "presigned-url-session",
+    DurationSeconds: 900,
+  }));
+  return new S3Client({
+    region,
+    credentials: {
+      accessKeyId: assumed.Credentials!.AccessKeyId!,
+      secretAccessKey: assumed.Credentials!.SecretAccessKey!,
+      sessionToken: assumed.Credentials!.SessionToken!,
+    },
+  });
+}
+
 export default async function mediaHandler(req: NextApiRequest, res: NextApiResponse) {
   try {
-    const { accountId, fileType, bucketName, region, originalName } = req.body;
+    const { accountId, fileType, bucketName, region, originalName, key, uploadId, partNumber, parts, partSize } = req.body;
     const roleName = "apt-aghosh-pe-s3-fullaccess";
+    const action = req.query.action;
 
     // Validate accountId presence and format
     if (!accountId) {
@@ -46,51 +70,88 @@ export default async function mediaHandler(req: NextApiRequest, res: NextApiResp
       return res.status(403).json({ error: "This accountId is not allowed." });
     }
 
-    const roleArn = `arn:aws:iam::${accountId}:role/${roleName}`;
+    // Use provided or default region/bucket
+    const s3Region = region || process.env.REGION;
+    const s3Bucket = bucketName || process.env.BUCKET_NAME;
 
-    // Assume the role using STS
-    const sts = new STSClient({ region: region || process.env.REGION });
-    const assumeRoleCommand = new AssumeRoleCommand({
-      RoleArn: roleArn,
-      RoleSessionName: "presigned-url-session",
-      DurationSeconds: 900,
-    });
-    const assumed = await sts.send(assumeRoleCommand);
-
-    if (!assumed.Credentials) {
-      return res.status(500).json({ error: "Failed to assume role" });
+    // --- MULTIPART UPLOAD HANDLING ---
+    if (req.method === "POST" && action === "initiate") {
+      // Initiate multipart upload
+      const s3 = await getS3Client(accountId, s3Region, roleName);
+      const Key = originalName || `${randomUUID()}`;
+      const command = new CreateMultipartUploadCommand({
+        Bucket: s3Bucket,
+        Key,
+        ContentType: fileType,
+      });
+      const result = await s3.send(command);
+      return res.status(200).json({ uploadId: result.UploadId, key: Key });
     }
 
-    // Use temporary credentials to create S3 client
-    const s3Client = new S3Client({
-      region: region || process.env.REGION,
-      credentials: {
-        accessKeyId: assumed.Credentials.AccessKeyId!,
-        secretAccessKey: assumed.Credentials.SecretAccessKey!,
-        sessionToken: assumed.Credentials.SessionToken!,
-      },
-    });
+    if (req.method === "POST" && action === "presign") {
+      // Presign URL for a part
+      const s3 = await getS3Client(accountId, s3Region, roleName);
+      const command = new UploadPartCommand({
+        Bucket: s3Bucket,
+        Key: key,
+        PartNumber: partNumber,
+        UploadId: uploadId,
+        ContentLength: partSize,
+      });
+      const presignedUrl = await getSignedUrl(s3, command, { expiresIn: 3600 });
+      return res.status(200).json({ presignedUrl });
+    }
 
-    const contentType = fileType || "application/octet-stream";
-    const extension = contentType.split("/")[1] || "bin";
-    // Use originalName if provided, else generate a random filename
-    const Key = originalName || `${randomUUID()}.${extension}`;
+    if (req.method === "POST" && action === "complete") {
+      // Complete multipart upload
+      const s3 = await getS3Client(accountId, s3Region, roleName);
+      const command = new CompleteMultipartUploadCommand({
+        Bucket: s3Bucket,
+        Key: key,
+        UploadId: uploadId,
+        MultipartUpload: { Parts: parts },
+      });
+      await s3.send(command);
+      return res.status(200).json({ success: true });
+    }
 
-    const command = new PutObjectCommand({
-      Bucket: bucketName || process.env.BUCKET_NAME,
-      Key,
-      ContentType: contentType,
-    });
+    if (req.method === "POST" && action === "abort") {
+      // Abort multipart upload
+      const s3 = await getS3Client(accountId, s3Region, roleName);
+      const command = new AbortMultipartUploadCommand({
+        Bucket: s3Bucket,
+        Key: key,
+        UploadId: uploadId,
+      });
+      await s3.send(command);
+      return res.status(200).json({ success: true });
+    }
 
-    const uploadUrl = await getSignedUrl(s3Client, command, { expiresIn: 300 });
+    // --- SINGLE PUT (for files ≤ 5GB) ---
+    if (req.method === "POST" && !action) {
+      const s3 = await getS3Client(accountId, s3Region, roleName);
+      const contentType = fileType || "application/octet-stream";
+      const extension = contentType.split("/")[1] || "bin";
+      const Key = originalName || `${randomUUID()}.${extension}`;
 
-    res.status(200).json({
-      uploadUrl,
-      key: Key,
-    });
+      const command = new PutObjectCommand({
+        Bucket: s3Bucket,
+        Key,
+        ContentType: contentType,
+      });
+
+      const uploadUrl = await getSignedUrl(s3, command, { expiresIn: 300 });
+
+      return res.status(200).json({
+        uploadUrl,
+        key: Key,
+      });
+    }
+
+    // If no valid action
+    return res.status(400).json({ error: "Invalid request" });
   } catch (error: any) {
-    // Log detailed error server-side, return generic error to client
-    console.error("Error generating signed URL", error);
-    res.status(500).json({ error: "Failed to generate upload URL" });
+    console.error("Error in media API:", error);
+    res.status(500).json({ error: "Failed to process request" });
   }
 }

@@ -21,12 +21,12 @@ function Upload() {
       return;
     }
 
-    const key = await uploadToS3(file, { accountId, bucketName, region });
-
-    if (key) {
+    setMessage("Uploading...");
+    try {
+      const key = await uploadToS3(file, { accountId, bucketName, region });
       setMessage(`Upload successful. S3 Key: ${key}`);
-    } else {
-      setMessage("Upload failed.");
+    } catch (err: any) {
+      setMessage("Upload failed: " + (err?.message || "Unknown error"));
     }
   }
 
