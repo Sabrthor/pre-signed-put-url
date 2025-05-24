@@ -1,40 +1,121 @@
 // pages/api/media.ts
+/*
 import type { NextApiRequest, NextApiResponse } from "next";
 import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { randomUUID } from "crypto";
-
-const s3Client = new S3Client({
-  region: process.env.REGION,
-  credentials: {
-    accessKeyId: process.env.ACCESS_KEY!,
-    secretAccessKey: process.env.SECRET_KEY!,
-  },
-});
+import { STSClient, AssumeRoleCommand } from "@aws-sdk/client-sts";
 
 export default async function mediaHandler(req: NextApiRequest, res: NextApiResponse) {
   try {
-    const fileType = (req.query.fileType as string) || "application/octet-stream";
-    const extension = fileType.split("/")[1] || "bin";
+    // Accept roleArn, fileType, and optionally bucketName/region from frontend
+    const { roleArn, fileType, bucketName, region } = req.body;
 
+    if (!roleArn) {
+      return res.status(400).json({ error: "roleArn is required" });
+    }
+
+    // Assume the role using STS
+    const sts = new STSClient({ region: region || process.env.REGION });
+    const assumeRoleCommand = new AssumeRoleCommand({
+      RoleArn: roleArn,
+      RoleSessionName: "presigned-url-session",
+      DurationSeconds: 900,
+    });
+    const assumed = await sts.send(assumeRoleCommand);
+
+    if (!assumed.Credentials) {
+      return res.status(500).json({ error: "Failed to assume role" });
+    }
+
+    // Use temporary credentials to create S3 client
+    const s3Client = new S3Client({
+      region: region || process.env.REGION,
+      credentials: {
+        accessKeyId: assumed.Credentials.AccessKeyId!,
+        secretAccessKey: assumed.Credentials.SecretAccessKey!,
+        sessionToken: assumed.Credentials.SessionToken!,
+      },
+    });
+
+    const contentType = fileType || "application/octet-stream";
+    const extension = contentType.split("/")[1] || "bin";
     const Key = `${randomUUID()}.${extension}`;
 
     const command = new PutObjectCommand({
-      Bucket: process.env.BUCKET_NAME,
+      Bucket: bucketName || process.env.BUCKET_NAME,
       Key,
-      ContentType: fileType,
+      ContentType: contentType,
     });
 
     const uploadUrl = await getSignedUrl(s3Client, command, { expiresIn: 300 });
-
-    console.log("uploadUrl", uploadUrl);
 
     res.status(200).json({
       uploadUrl,
       key: Key,
     });
-  } catch (error) {
+  } catch (error: any) {
+  console.error("Error generating signed URL", error);
+  res.status(500).json({ error: error.message || "Failed to generate upload URL" });
+}
+}
+*/
+import type { NextApiRequest, NextApiResponse } from "next";
+import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
+import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
+import { randomUUID } from "crypto";
+import { STSClient, AssumeRoleCommand } from "@aws-sdk/client-sts";
+
+export default async function mediaHandler(req: NextApiRequest, res: NextApiResponse) {
+  try {
+    const { roleArn, fileType, bucketName, region, originalName } = req.body;
+
+    if (!roleArn) {
+      return res.status(400).json({ error: "roleArn is required" });
+    }
+
+    // Assume the role using STS
+    const sts = new STSClient({ region: region || process.env.REGION });
+    const assumeRoleCommand = new AssumeRoleCommand({
+      RoleArn: roleArn,
+      RoleSessionName: "presigned-url-session",
+      DurationSeconds: 900,
+    });
+    const assumed = await sts.send(assumeRoleCommand);
+
+    if (!assumed.Credentials) {
+      return res.status(500).json({ error: "Failed to assume role" });
+    }
+
+    // Use temporary credentials to create S3 client
+    const s3Client = new S3Client({
+      region: region || process.env.REGION,
+      credentials: {
+        accessKeyId: assumed.Credentials.AccessKeyId!,
+        secretAccessKey: assumed.Credentials.SecretAccessKey!,
+        sessionToken: assumed.Credentials.SessionToken!,
+      },
+    });
+
+    const contentType = fileType || "application/octet-stream";
+    const extension = contentType.split("/")[1] || "bin";
+    // Use originalName if provided, else generate a random filename
+    const Key = originalName || `${randomUUID()}.${extension}`;
+
+    const command = new PutObjectCommand({
+      Bucket: bucketName || process.env.BUCKET_NAME,
+      Key,
+      ContentType: contentType,
+    });
+
+    const uploadUrl = await getSignedUrl(s3Client, command, { expiresIn: 300 });
+
+    res.status(200).json({
+      uploadUrl,
+      key: Key,
+    });
+  } catch (error: any) {
     console.error("Error generating signed URL", error);
-    res.status(500).json({ error: "Failed to generate upload URL" });
+    res.status(500).json({ error: error.message || "Failed to generate upload URL" });
   }
 }
